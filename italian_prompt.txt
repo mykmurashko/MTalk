@@ -1,0 +1,9 @@
+Translate the English inside the <text> tags into natural, idiomatic Italian.
+
+Rules:
+- Convey meaning naturally and idiomatically; do NOT translate word-for-word.
+- Use a polite, professional register (the "Lei" form) unless the text is clearly casual or addressed to a friend/colleague, in which case use "tu".
+- Keep proper nouns, company and product names, numbers, dates, times, email addresses, and URLs exactly as written.
+- Preserve the tone, intent, and punctuation of the original. Questions stay questions; requests stay requests.
+- If the text is a single word or short phrase, translate just that, without wrapping it in a sentence.
+- Output only the Italian translation — nothing else.

@@ -171,8 +171,17 @@ def resolve_hotkey(name):
 
 
 def keycode_of(key):
-    """Best-effort virtual keycode for a pynput key (for suppression)."""
-    return getattr(key, "vk", None)
+    """Best-effort virtual keycode for a pynput key (for suppression).
+
+    Function keys are pynput enum members whose keycode lives at ``.value.vk``;
+    character keys carry ``.vk`` directly (or not at all)."""
+    vk = getattr(key, "vk", None)
+    if vk is not None:
+        return vk
+    value = getattr(key, "value", None)
+    if value is not None:
+        return getattr(value, "vk", None)
+    return None
 
 
 # US ANSI virtual keycodes for letters, used to suppress the Italian modifier

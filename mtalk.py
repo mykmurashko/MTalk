@@ -47,14 +47,14 @@ PROMPT_PATH = os.environ.get("MTALK_PROMPT", os.path.join(HERE, "italian_prompt.
 
 # ANSI styling for a tidy console.
 DIM = "\033[2m"
-CYAN = "\033[36m"
-GREEN = "\033[32m"
 RED = "\033[31m"
 RESET = "\033[0m"
+CLEAR_LINE = "\r\033[K"
+INDENT = " " * 7  # aligns the translation under the text (after "HH:MM  ")
 
 
 def now():
-    return datetime.now().strftime("%H:%M:%S")
+    return datetime.now().strftime("%H:%M")
 
 
 def load_italian_prompt():
@@ -186,13 +186,22 @@ _LETTER_VK = {
 
 
 def main():
-    from faster_whisper import WhisperModel
     import logging
+    import warnings
 
-    logging.getLogger("faster_whisper").setLevel(logging.ERROR)
+    # Keep the console silent — no library warnings or HF hub notices.
+    warnings.filterwarnings("ignore")
+    for _name in ("faster_whisper", "huggingface_hub", "transformers", "ctranslate2", "urllib3"):
+        logging.getLogger(_name).setLevel(logging.ERROR)
 
-    print(f"{DIM}MTalk — loading whisper '{MODEL_NAME}'…{RESET}")
+    from faster_whisper import WhisperModel
+
+    # Transient loading cue that erases itself once the model is ready.
+    sys.stdout.write(f"{DIM}loading…{RESET}")
+    sys.stdout.flush()
     model = WhisperModel(MODEL_NAME, device="cpu", compute_type="int8")
+    sys.stdout.write(CLEAR_LINE)
+    sys.stdout.flush()
 
     prompt = load_italian_prompt()
     hotkey = resolve_hotkey(HOTKEY_NAME)
@@ -210,24 +219,24 @@ def main():
         text = "".join(seg.text for seg in segments).strip()
         if not text:
             return
+        stamp = now()
         if to_italian:
             it = translate_to_italian(text, prompt)
             if it is None:
-                # fall back to English so nothing is lost
+                # translation failed — keep the English so nothing is lost
                 copy_to_clipboard(text)
-                print(f"{DIM}{now()}{RESET}  {text}  {DIM}(translation failed){RESET}")
+                print(f"{DIM}{stamp}{RESET}  {text}")
                 if AUTO_PASTE:
                     paste()
                 return
             copy_to_clipboard(it)  # only Italian on the clipboard
-            print(f"{DIM}{now()}{RESET}")
-            print(f"  {DIM}EN{RESET}  {text}")
-            print(f"  {CYAN}IT{RESET}  {it}")
+            print(f"{DIM}{stamp}{RESET}  {text}")
+            print(f"{INDENT}{DIM}→{RESET} {it}")
             if AUTO_PASTE:
                 paste()
         else:
             copy_to_clipboard(text)
-            print(f"{DIM}{now()}{RESET}  {text}")
+            print(f"{DIM}{stamp}{RESET}  {text}")
             if AUTO_PASTE:
                 paste()
 
@@ -272,13 +281,6 @@ def main():
             return None
         return event
 
-    paste_mode = "auto-paste" if AUTO_PASTE else "clipboard only"
-    tr = "on" if CLAUDE_BIN else f"{RED}unavailable{RESET}"
-    print(
-        f"{GREEN}MTalk ready{RESET} {DIM}·{RESET} hold [{HOTKEY_NAME.upper()}] to dictate "
-        f"{DIM}·{RESET} hold [{HOTKEY_NAME.upper()}+{ITALIAN_KEY.upper()}] for Italian ({tr}) "
-        f"{DIM}·{RESET} {paste_mode} {DIM}·{RESET} Ctrl+C to quit"
-    )
     listener = keyboard.Listener(
         on_press=on_press,
         on_release=on_release,

@@ -1,18 +1,24 @@
-# MTalk — Whisper push-to-talk dictation (macOS), with on-the-fly Italian
+# MTalk — Whisper push-to-talk dictation (macOS), with Italian and Russian
 
 Hold **F5**, speak, release — your words are transcribed locally with Whisper and
-pasted into the focused app. Hold **F5 + I** while you speak and the text is
-translated to **Italian** before it's pasted (only the Italian lands on your
-clipboard). Transcription is fully local; translation uses the `claude` CLI you're
+pasted into the focused app. Three modes, all on one key:
+
+| Hold | You speak | You get |
+| ---- | --------- | ------- |
+| **F5** | English | the English transcription |
+| **F5 + I** | English | the **Italian** translation (only the Italian is on the clipboard) |
+| **F5 + R** | **Russian** | the Russian transcription — no translation involved |
+
+Transcription is fully local; the Italian translation uses the `claude` CLI you're
 already logged in to (no API key needed).
 
 The console stays clean — one entry per result:
 
 ```
 14:02:11  Let's ship the update on Friday.
-14:03:40
-  EN  can you confirm the meeting at 3 pm with the team
-  IT  Può confermare la riunione alle 15:00 con il team?
+14:03:40  can you confirm the meeting at 3 pm with the team
+          → Può confermare la riunione alle 15:00 con il team?
+14:05:02  Привет, давай отправим обновление в пятницу.
 ```
 
 ---
@@ -24,7 +30,9 @@ The console stays clean — one entry per result:
    sending F5 — so the helper never saw it (external keyboards were unaffected).
    MTalk ships a one-command fix (see step 3).
 2. **Hold F5 + I to translate to Italian** as you dictate.
-3. **A clean CLI** — just a timestamp and the text.
+3. **Hold F5 + R to dictate in Russian** — transcribed as Russian, straight to
+   the clipboard, with no translation step in between.
+4. **A clean CLI** — just a timestamp and the text.
 
 ---
 
@@ -104,7 +112,15 @@ Leave it running, then:
 1. Click into Claude Code (or any app).
 2. **Hold F5, speak, release** → English transcription appears at your cursor.
 3. **Hold F5 + I, speak, release** → the Italian translation appears instead.
-4. Hit Enter to send.
+4. **Hold F5 + R and speak Russian, release** → the Russian text appears.
+5. Hit Enter to send.
+
+> **First time you use F5 + R** MTalk downloads a second, *multilingual* Whisper
+> model (`small`, ~500 MB), because the default `small.en` is English-only and
+> hears Russian as phonetic nonsense. The download starts the moment you press R,
+> so it overlaps with you speaking; it happens once, then it's cached. Set
+> `MTALK_MODEL` to a multilingual model (e.g. `small`, `medium`) and MTalk uses
+> that one model for everything instead of loading a second.
 
 ## 5. The Italian translation prompt (edit to taste)
 
@@ -121,27 +137,37 @@ Set environment variables before launching:
 # Bigger model = more accurate, slower. small.en (default) is a good balance.
 MTALK_MODEL=medium.en python mtalk.py
 
-# Change the hotkey or the Italian modifier
+# More accurate Russian (the second model, only used by F5 + R)
+MTALK_MODEL_RU=medium python mtalk.py
+
+# One multilingual model for everything — no second model to load
+MTALK_MODEL=small python mtalk.py
+
+# Change the hotkey or the language modifiers
 MTALK_HOTKEY=f6 python mtalk.py
 MTALK_ITALIAN=j python mtalk.py
+MTALK_RUSSIAN=k python mtalk.py
 
 # Clipboard only, no auto-paste
 MTALK_PASTE=0 python mtalk.py
 ```
 
-| Variable        | Default              | Meaning                                       |
-| --------------- | -------------------- | --------------------------------------------- |
-| `MTALK_MODEL`   | `small.en`           | Whisper model (`tiny.en`→`large-v3`)          |
-| `MTALK_HOTKEY`  | `f5`                 | Push-to-talk key (`f1`–`f20` or a character)  |
-| `MTALK_ITALIAN` | `i`                  | Key held with the hotkey to translate         |
-| `MTALK_PASTE`   | `1`                  | `1` auto-paste, `0` clipboard only            |
-| `MTALK_DEVICE`  | system default       | Input device index/name for sounddevice       |
-| `MTALK_CLAUDE`  | `claude` on PATH     | Path to the `claude` CLI                       |
-| `MTALK_PROMPT`  | `italian_prompt.txt` | Path to the translation prompt                 |
+| Variable         | Default              | Meaning                                       |
+| ---------------- | -------------------- | --------------------------------------------- |
+| `MTALK_MODEL`    | `small.en`           | Whisper model (`tiny.en`→`large-v3`)          |
+| `MTALK_MODEL_RU` | `small`              | Multilingual model used for Russian           |
+| `MTALK_HOTKEY`   | `f5`                 | Push-to-talk key (`f1`–`f20` or a character)  |
+| `MTALK_ITALIAN`  | `i`                  | Key held with the hotkey to translate         |
+| `MTALK_RUSSIAN`  | `r`                  | Key held with the hotkey to dictate Russian   |
+| `MTALK_PASTE`    | `1`                  | `1` auto-paste, `0` clipboard only            |
+| `MTALK_DEVICE`   | system default       | Input device index/name for sounddevice       |
+| `MTALK_CLAUDE`   | `claude` on PATH     | Path to the `claude` CLI                       |
+| `MTALK_PROMPT`   | `italian_prompt.txt` | Path to the translation prompt                 |
 
 Models fastest → most accurate: `tiny.en`, `base.en`, `small.en`, `medium.en`,
 `large-v3`. On Apple Silicon, `small.en` transcribes a sentence in well under a
-second. English-only models (`.en`) are fine since you dictate in English.
+second. The `.en` models are English-only, which is why Russian uses its own
+multilingual model — drop the `.en` suffix for the multilingual variant.
 
 ## Troubleshooting
 
@@ -150,9 +176,15 @@ second. English-only models (`.en`) are fine since you dictate in English.
   `~/Library/LaunchAgents/com.mtalk.keyremap.plist` exists.
 - **Hotkey does nothing** → Accessibility + Input Monitoring not granted to your
   terminal app. Re-check step 2 and fully restart the terminal.
-- **A stray "i" gets typed / F5 refreshes the page** → those keys are suppressed
-  while MTalk is running; make sure MTalk is the process in focus of the tap
-  (restart it if you changed terminals).
+- **A stray "i"/"r" gets typed / F5 refreshes the page** → those keys are
+  suppressed while MTalk is running; make sure MTalk is the process in focus of
+  the tap (restart it if you changed terminals).
+- **Russian comes out as phonetic English** ("Prevet, devayat…") → you're on an
+  English-only model. Leave `MTALK_MODEL_RU` unset, or point `MTALK_MODEL` at a
+  multilingual model (no `.en` suffix).
+- **First F5 + R hangs for a while** → it's the one-time ~500 MB download of the
+  multilingual model. Pre-fetch it with
+  `python -c "from faster_whisper import WhisperModel; WhisperModel('small')"`.
 - **Italian mode does nothing** → run the `claude -p` check in step 1;
   `claude` must be installed and logged in.
 - **Paste doesn't land** → some apps block synthetic Cmd+V; run with

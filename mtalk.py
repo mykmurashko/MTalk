@@ -1,20 +1,28 @@
 #!/usr/bin/env python3
-"""MTalk — Whisper push-to-talk dictation for macOS, with on-the-fly Italian.
+"""MTalk — Whisper push-to-talk dictation for macOS, with Italian and Russian.
 
 Hold F5, speak, release: your speech is transcribed locally with faster-whisper
 and pasted into the focused app. Hold F5 + I while speaking and the transcription
 is translated to Italian (via the `claude` CLI) before it's pasted — only the
-Italian lands on your clipboard.
+Italian lands on your clipboard. Hold F5 + R and dictate in Russian instead: the
+audio is transcribed as Russian and the Russian text lands on your clipboard —
+no translation is involved.
+
+Russian needs a multilingual Whisper model, since the default `small.en` only
+hears English. That second model is downloaded/loaded the first time you use
+F5 + R, and the load starts the moment you press R so it overlaps with speaking.
 
 The console stays clean: one line per result.
     12:34:56  the transcribed english text
-    12:34:56  EN  the english you spoke
-              IT  la traduzione italiana
+    12:34:56  the english you spoke
+              → la traduzione italiana
 
 Configure via environment variables:
     MTALK_MODEL      whisper model name (default: small.en)
+    MTALK_MODEL_RU   multilingual model used for Russian (default: small)
     MTALK_HOTKEY     push-to-talk key (default: f5)
     MTALK_ITALIAN    modifier key that switches to Italian (default: i)
+    MTALK_RUSSIAN    modifier key that switches to Russian (default: r)
     MTALK_PASTE      1 = auto-paste, 0 = clipboard only (default: 1)
     MTALK_DEVICE     input device index/name for sounddevice (default: system)
     MTALK_CLAUDE     path to the claude CLI (default: found on PATH)
@@ -38,8 +46,10 @@ CHANNELS = 1
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 MODEL_NAME = os.environ.get("MTALK_MODEL", "small.en")
+RU_MODEL_NAME = os.environ.get("MTALK_MODEL_RU", "small")
 HOTKEY_NAME = os.environ.get("MTALK_HOTKEY", "f5")
 ITALIAN_KEY = os.environ.get("MTALK_ITALIAN", "i").strip().lower()[:1] or "i"
+RUSSIAN_KEY = os.environ.get("MTALK_RUSSIAN", "r").strip().lower()[:1] or "r"
 AUTO_PASTE = os.environ.get("MTALK_PASTE", "1") != "0"
 DEVICE = os.environ.get("MTALK_DEVICE") or None
 CLAUDE_BIN = os.environ.get("MTALK_CLAUDE") or shutil.which("claude")
@@ -184,7 +194,7 @@ def keycode_of(key):
     return None
 
 
-# US ANSI virtual keycodes for letters, used to suppress the Italian modifier
+# US ANSI virtual keycodes for letters, used to suppress the language modifiers
 # at the event-tap level (darwin_intercept only gives us a raw keycode).
 _LETTER_VK = {
     "a": 0, "b": 11, "c": 8, "d": 2, "e": 14, "f": 3, "g": 5, "h": 4,
@@ -216,58 +226,94 @@ def main():
     hotkey = resolve_hotkey(HOTKEY_NAME)
     hotkey_vk = keycode_of(hotkey)
     italian_vk = _LETTER_VK.get(ITALIAN_KEY)
+    russian_vk = _LETTER_VK.get(RUSSIAN_KEY)
+    modifier_vks = {vk for vk in (italian_vk, russian_vk) if vk is not None}
     recorder = Recorder()
 
     recording = threading.Event()
-    italian = threading.Event()
+    # Language for the current hold: "en" plain, "it" translated to Italian,
+    # "ru" dictated in Russian. Chosen by the modifier keys in on_press.
+    mode = {"lang": "en"}
 
-    def transcribe_and_emit(audio, to_italian):
+    ru_lock = threading.Lock()
+    ru_state = {"model": None}
+
+    def russian_model():
+        """The multilingual model used for Russian; loaded on first use.
+
+        The default `small.en` is English-only, so Russian needs its own model.
+        Loading it lazily keeps startup fast for the usual English path."""
+        if not MODEL_NAME.endswith(".en"):
+            return model  # the configured model already handles every language
+        with ru_lock:
+            if ru_state["model"] is None:
+                try:
+                    ru_state["model"] = WhisperModel(
+                        RU_MODEL_NAME, device="cpu", compute_type="int8"
+                    )
+                except Exception as exc:  # e.g. the one-time download failed
+                    print(
+                        f"{RED}[error]{RESET} could not load Russian model "
+                        f"{RU_MODEL_NAME!r}: {exc}",
+                        file=sys.stderr,
+                    )
+            return ru_state["model"]
+
+    def transcribe_and_emit(audio, lang):
         if audio.size < SAMPLE_RATE * 0.2:  # under ~0.2s, ignore
             return
-        segments, _ = model.transcribe(audio, language="en", beam_size=1)
+        if lang == "ru":
+            ru = russian_model()
+            if ru is None:  # the model couldn't be loaded; error already shown
+                return
+            segments, _ = ru.transcribe(audio, language="ru", beam_size=1)
+        else:
+            segments, _ = model.transcribe(audio, language="en", beam_size=1)
         text = "".join(seg.text for seg in segments).strip()
         if not text:
             return
         stamp = now()
-        if to_italian:
+        if lang == "it":
             it = translate_to_italian(text, prompt)
-            if it is None:
-                # translation failed — keep the English so nothing is lost
-                copy_to_clipboard(text)
+            if it is not None:
+                copy_to_clipboard(it)  # only Italian on the clipboard
                 print(f"{DIM}{stamp}{RESET}  {text}")
+                print(f"{INDENT}{DIM}→{RESET} {it}")
                 if AUTO_PASTE:
                     paste()
                 return
-            copy_to_clipboard(it)  # only Italian on the clipboard
-            print(f"{DIM}{stamp}{RESET}  {text}")
-            print(f"{INDENT}{DIM}→{RESET} {it}")
-            if AUTO_PASTE:
-                paste()
-        else:
-            copy_to_clipboard(text)
-            print(f"{DIM}{stamp}{RESET}  {text}")
-            if AUTO_PASTE:
-                paste()
+            # translation failed — fall through and keep the English
+        copy_to_clipboard(text)
+        print(f"{DIM}{stamp}{RESET}  {text}")
+        if AUTO_PASTE:
+            paste()
 
     def on_press(key):
-        # switch to Italian mode if the modifier is pressed while recording
-        if recording.is_set():
+        # a modifier pressed while recording picks the language for this hold
+        if recording.is_set() and mode["lang"] == "en":
             ch = getattr(key, "char", None)
-            if ch and ch.lower() == ITALIAN_KEY:
-                italian.set()
+            ch = ch.lower() if ch else None
+            if ch == ITALIAN_KEY:
+                mode["lang"] = "it"
+                return
+            if ch == RUSSIAN_KEY:
+                mode["lang"] = "ru"
+                # start loading the multilingual model while you're still
+                # speaking, so the first Russian dictation isn't a long wait
+                threading.Thread(target=russian_model, daemon=True).start()
                 return
         if _is_hotkey(key) and not recording.is_set():
-            italian.clear()
+            mode["lang"] = "en"
             recording.set()
             recorder.start()
 
     def on_release(key):
         if _is_hotkey(key) and recording.is_set():
             recording.clear()
-            to_italian = italian.is_set()
+            lang = mode["lang"]
             audio = recorder.stop()
             threading.Thread(
-                target=transcribe_and_emit, args=(audio, to_italian), daemon=True
+                target=transcribe_and_emit, args=(audio, lang), daemon=True
             ).start()
 
     def _is_hotkey(key):
@@ -277,16 +323,16 @@ def main():
         return kv is not None and hotkey_vk is not None and kv == hotkey_vk
 
     def darwin_intercept(event_type, event):
-        """Suppress the hotkey and the Italian modifier so they don't leak into
-        the focused app (e.g. F5 refreshing a browser, or a stray 'i')."""
+        """Suppress the hotkey and the language modifiers so they don't leak
+        into the focused app (e.g. F5 refreshing a browser, a stray 'i'/'r')."""
         import Quartz
 
         kc = Quartz.CGEventGetIntegerValueField(event, Quartz.kCGKeyboardEventKeycode)
         # swallow the push-to-talk key entirely
         if hotkey_vk is not None and kc == hotkey_vk:
             return None
-        # swallow the Italian modifier only while recording
-        if recording.is_set() and italian_vk is not None and kc == italian_vk:
+        # swallow a language modifier only while recording
+        if recording.is_set() and kc in modifier_vks:
             return None
         return event
 

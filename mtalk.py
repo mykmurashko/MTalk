@@ -288,15 +288,26 @@ def main():
         if AUTO_PASTE:
             paste()
 
+    def _is_modifier(key, letter, letter_vk):
+        """Match a language modifier, by physical keycode first.
+
+        The keycode is layout-independent; the character is not. On a Russian
+        layout the physical R key reports 'к' and I reports 'ш', so matching on
+        the character alone silently misses the modifier — which matters here,
+        since Russian is exactly when that layout is likely to be active."""
+        vk = keycode_of(key)
+        if letter_vk is not None and vk == letter_vk:
+            return True
+        ch = getattr(key, "char", None)
+        return bool(ch) and ch.lower() == letter
+
     def on_press(key):
         # a modifier pressed while recording picks the language for this hold
         if recording.is_set() and mode["lang"] == "en":
-            ch = getattr(key, "char", None)
-            ch = ch.lower() if ch else None
-            if ch == ITALIAN_KEY:
+            if _is_modifier(key, ITALIAN_KEY, italian_vk):
                 mode["lang"] = "it"
                 return
-            if ch == RUSSIAN_KEY:
+            if _is_modifier(key, RUSSIAN_KEY, russian_vk):
                 mode["lang"] = "ru"
                 # start loading the multilingual model while you're still
                 # speaking, so the first Russian dictation isn't a long wait

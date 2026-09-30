@@ -23,27 +23,29 @@ The console stays clean — one entry per result:
 
 ---
 
-## What's new vs. a plain Whisper dictation script
+## Highlights
 
-1. **The built-in F5 key works now.** On newer Macs the F5 key has a 🎤 (Dictation)
-   icon and pressing it on the *built-in* keyboard fires macOS Dictation instead of
-   sending F5 — so the helper never saw it (external keyboards were unaffected).
-   MTalk ships a one-command fix (see step 3).
-2. **Hold F5 + I to translate to Italian** as you dictate.
-3. **Hold F5 + R to dictate in Russian** — transcribed as Russian, straight to
-   the clipboard, with no translation step in between.
-4. **A clean CLI** — just a timestamp and the text.
+- **Works with the built-in F5 key.** On newer Macs the F5 key has a 🎤 (Dictation)
+  icon and pressing it on the *built-in* keyboard fires macOS Dictation instead of
+  sending F5. MTalk ships a one-command fix (see step 3). External keyboards are
+  unaffected.
+- **F5 + I translates to Italian** as you dictate.
+- **F5 + R dictates in Russian**, transcribed straight to the clipboard with no
+  translation step.
+- **A quiet CLI** that prints a timestamp and the text, nothing else.
+
+**Requirements:** macOS, Python 3.9+, Homebrew, and (for Italian only) the
+[`claude` CLI](https://docs.anthropic.com/en/docs/claude-code) logged in.
 
 ---
 
 ## 1. Install
 
-You need **Python 3.9+**, **Homebrew**, and the **`claude` CLI** (logged in).
-
 ```bash
 # system audio library used by sounddevice
 brew install portaudio
 
+git clone https://github.com/mykmurashko/MTalk.git
 cd MTalk
 python3 -m venv .venv
 source .venv/bin/activate
@@ -91,8 +93,8 @@ hidutil property --get UserKeyMapping   # shows the active remap
 ```
 
 > **Do I also need to disable macOS Dictation?** No. The remap above intercepts the
-> key before Dictation can react, so native Dictation never fires on it. If your
-> team *prefers* to also turn Dictation off entirely (optional), do it manually:
+> key before Dictation can react, so native Dictation never fires on it. If you
+> *prefer* to also turn Dictation off entirely (optional), do it manually:
 > **System Settings → Keyboard → Dictation → turn the toggle Off**, or set
 > **Dictation → Shortcut → Off**. This is not required for MTalk to work.
 

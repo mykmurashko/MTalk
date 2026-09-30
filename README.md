@@ -194,3 +194,7 @@ multilingual model — drop the `.en` suffix for the multilingual variant.
 - **PortAudioError** → `brew install portaudio`, then
   `pip install --force-reinstall sounddevice`.
 - **First run is slow** → it's downloading the Whisper model once; later runs are fast.
+
+## License
+
+[MIT](LICENSE)

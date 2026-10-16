@@ -34,10 +34,13 @@ LIBPY="$PYHOME/Python3"; [ -f "$LIBPY" ] || LIBPY="$PYHOME/Python"
 INCLUDE="$PYHOME/Headers"
 FRAMEWORKS="$(cd "$PYHOME/../../.." && pwd)"  # dir holding Python3.framework (its @rpath)
 
-rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS"
+# Build into a scratch bundle first. macOS ties the permissions you grant to
+# the app's exact signature, so the installed app is only replaced when its
+# contents actually change; updating the Python code alone never resets them.
+BUILD="$(mktemp -d)/MTalk.app"
+mkdir -p "$BUILD/Contents/MacOS"
 
-cat > "$APP/Contents/Info.plist" <<EOF
+cat > "$BUILD/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -57,10 +60,10 @@ cat > "$APP/Contents/Info.plist" <<EOF
 </plist>
 EOF
 
-mkdir -p "$APP/Contents/Resources"
+mkdir -p "$BUILD/Contents/Resources"
 
 # Native launcher: Python runs inside MTalk's own process (see launcher.c).
-clang -O2 -o "$APP/Contents/MacOS/MTalk" "$SRC/launcher.c" \
+clang -O2 -o "$BUILD/Contents/MacOS/MTalk" "$SRC/launcher.c" \
     -I "$INCLUDE" "$LIBPY" -Wl,-rpath,"$FRAMEWORKS" \
     -DMTALK_DIR="\"$REPO\"" -DMTALK_SITE="\"$SITE\"" \
     -DMTALK_CLAUDE="\"$CLAUDE\"" -DMTALK_PATH="\"$LAUNCH_PATH\""
@@ -68,9 +71,17 @@ clang -O2 -o "$APP/Contents/MacOS/MTalk" "$SRC/launcher.c" \
 # App icon: the same "M" logo as the menu bar.
 ICONSET="$(mktemp -d)/MTalk.iconset"
 (cd "$REPO" && "$PY" -c "import sys, menubar; menubar.write_iconset(sys.argv[1])" "$ICONSET")
-iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/MTalk.icns"
+iconutil -c icns "$ICONSET" -o "$BUILD/Contents/Resources/MTalk.icns"
 
-# A stable (ad-hoc) signature so macOS remembers the permissions you grant.
-codesign --force --sign - "$APP" >/dev/null 2>&1 || true
-
+STAMP="$(cd "$BUILD/Contents" && cat Info.plist MacOS/MTalk Resources/MTalk.icns | shasum | cut -d' ' -f1)"
+if [ -f "$APP/Contents/Resources/build.stamp" ] && [ "$(cat "$APP/Contents/Resources/build.stamp")" = "$STAMP" ]; then
+    echo "Updated MTalk's code; $APP unchanged (permissions kept). Quit and reopen MTalk."
+    exit 0
+fi
+echo "$STAMP" > "$BUILD/Contents/Resources/build.stamp"
+codesign --force --sign - "$BUILD" >/dev/null 2>&1 || true
+rm -rf "$APP"
+mkdir -p "$(dirname "$APP")"
+mv "$BUILD" "$APP"
 echo "Installed $APP"
+echo "If MTalk was allowed in Accessibility / Input Monitoring before, remove it there and add it again."

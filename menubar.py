@@ -14,7 +14,9 @@ import os
 import threading
 from datetime import datetime
 
+import CoreText
 import objc
+import Quartz
 from AppKit import (
     NSApplication,
     NSApplicationActivationPolicyAccessory,
@@ -25,6 +27,7 @@ from AppKit import (
     NSFontAttributeName,
     NSFontWeightBold,
     NSForegroundColorAttributeName,
+    NSGraphicsContext,
     NSImage,
     NSInsetRect,
     NSMakePoint,
@@ -44,13 +47,16 @@ HISTORY_PATH = os.path.join(SUPPORT_DIR, "history.jsonl")
 MAX_HISTORY = 500  # entries kept on disk and listed in the menu
 TITLE_CHARS = 60   # menu entries are truncated to this; the tooltip has it all
 
-# The icon is an "M" on a circle. state -> (circle colour, letter colour, alpha)
+# The icon is an "M" on a circle.
+# state -> (circle colour, letter colour, alpha). A letter colour of None cuts
+# the M out of the circle; those icons are template images, so macOS draws
+# them in the menu bar's own colour (white on dark, black on light).
 STATES = {
-    "loading": ("whiteColor", "blackColor", 0.45),
-    "idle": ("whiteColor", "blackColor", 1.0),
+    "loading": ("blackColor", None, 0.4),
+    "idle": ("blackColor", None, 1.0),
     "recording": ("systemRedColor", "whiteColor", 1.0),
-    "working": ("whiteColor", "blackColor", 0.6),
-    "error": ("systemGrayColor", "whiteColor", 1.0),
+    "working": ("blackColor", None, 0.55),
+    "error": ("blackColor", None, 0.3),
 }
 ICON_SIZE = 18  # points; menu bar icons are ~16–18pt tall
 
@@ -61,20 +67,35 @@ def _make_icon(circle, letter, alpha):
     def draw(rect):
         getattr(NSColor, circle)().colorWithAlphaComponent_(alpha).setFill()
         NSBezierPath.bezierPathWithOvalInRect_(NSInsetRect(rect, 1, 1)).fill()
+
         attrs = {
-            NSFontAttributeName: NSFont.systemFontOfSize_weight_(11, NSFontWeightBold),
-            NSForegroundColorAttributeName: getattr(NSColor, letter)(),
+            NSFontAttributeName: NSFont.systemFontOfSize_weight_(10.5, NSFontWeightBold),
+            NSForegroundColorAttributeName: getattr(NSColor, letter or "blackColor")(),
         }
         text = NSAttributedString.alloc().initWithString_attributes_("M", attrs)
-        ts = text.size()
-        text.drawAtPoint_(
-            NSMakePoint((ICON_SIZE - ts.width) / 2, (ICON_SIZE - ts.height) / 2)
+        line = CoreText.CTLineCreateWithAttributedString(text)
+        # centre the glyph's actual outline, not its text box (which includes
+        # side bearings and descender space and sits visibly off-centre)
+        bounds = CoreText.CTLineGetBoundsWithOptions(
+            line, CoreText.kCTLineBoundsUseGlyphPathBounds
         )
+        x = (ICON_SIZE - bounds.size.width) / 2 - bounds.origin.x
+        y = (ICON_SIZE - bounds.size.height) / 2 - bounds.origin.y
+
+        ctx = NSGraphicsContext.currentContext().CGContext()
+        Quartz.CGContextSaveGState(ctx)
+        if letter is None:  # punch the M out of the circle
+            Quartz.CGContextSetBlendMode(ctx, Quartz.kCGBlendModeDestinationOut)
+        Quartz.CGContextSetTextPosition(ctx, x, y)
+        CoreText.CTLineDraw(line, ctx)
+        Quartz.CGContextRestoreGState(ctx)
         return True
 
     image = NSImage.imageWithSize_flipped_drawingHandler_(size, False, draw)
+    image.setTemplate_(letter is None)
     image.setAccessibilityDescription_("MTalk")
     return image
+
 
 LANG_TAGS = {"it": "IT  ", "ru": "RU  "}
 
@@ -206,6 +227,15 @@ class _MenuTarget(NSObject):
         pb.clearContents()
         pb.setString_forType_(text, NSPasteboardTypeString)
 
+    def startDictation_(self, sender):
+        if self.owner.on_start is not None:
+            self.owner.on_start(sender.representedObject(), by_click=True)
+
+    def iconClicked_(self, sender):
+        # only fires while the menu is detached, i.e. during a click recording
+        if self.owner.on_stop is not None:
+            self.owner.on_stop()
+
     def clearHistory_(self, sender):
         self.owner.history.clear()
         self.owner._rebuild_menu()
@@ -220,6 +250,10 @@ class MenuBar:
         self.hint = hint  # e.g. "Hold F5 to dictate"
         self._status_line = "Loading model…"
         self._icons = {}
+        self._ready = False
+        # set by the engine: on_start(lang, by_click=True), on_stop()
+        self.on_start = None
+        self.on_stop = None
 
         self.app = NSApplication.sharedApplication()
         # menu bar only: no Dock icon, no app switcher entry
@@ -232,14 +266,23 @@ class MenuBar:
         self.menu = NSMenu.alloc().init()
         self.menu.setAutoenablesItems_(False)
         self.item.setMenu_(self.menu)
+        self.item.button().setTarget_(self.target)
+        self.item.button().setAction_("iconClicked:")
 
         self._apply_state("loading")
         self._rebuild_menu()
 
     # --- thread-safe API -------------------------------------------------
 
-    def set_state(self, state, status_line=None):
-        AppHelper.callAfter(self._apply_state, state, status_line)
+    def set_state(self, state, status_line=None, by_click=False):
+        AppHelper.callAfter(self._apply_state, state, status_line, by_click)
+
+    def set_ready(self):
+        """The model is loaded: enable Start Dictation in the menu."""
+        def ready():
+            self._ready = True
+            self._rebuild_menu()
+        AppHelper.callAfter(ready)
 
     def history_changed(self):
         AppHelper.callAfter(self._rebuild_menu)
@@ -253,10 +296,15 @@ class MenuBar:
 
     # --- main thread only -------------------------------------------------
 
-    def _apply_state(self, state, status_line=None):
+    def _apply_state(self, state, status_line=None, by_click=False):
         if state not in self._icons:
             self._icons[state] = _make_icon(*STATES.get(state, STATES["idle"]))
         self.item.button().setImage_(self._icons[state])
+        if state == "recording" and by_click:
+            # detach the menu so one click on the red icon stops recording
+            self.item.setMenu_(None)
+        elif self.item.menu() is None:
+            self.item.setMenu_(self.menu)
         if status_line is not None:
             self._status_line = status_line
             self._rebuild_menu()
@@ -275,6 +323,16 @@ class MenuBar:
     def _rebuild_menu(self):
         self.menu.removeAllItems()
         self._add(self._status_line, enabled=False)
+        self.menu.addItem_(NSMenuItem.separatorItem())
+
+        # click to dictate: recording starts now, click the red icon to stop
+        for title, lang in (
+            ("Start Dictation", "en"),
+            ("Start Dictation → Italian", "it"),
+            ("Start Russian Dictation", "ru"),
+        ):
+            mi = self._add(title, "startDictation:", enabled=self._ready)
+            mi.setRepresentedObject_(lang)
         self.menu.addItem_(NSMenuItem.separatorItem())
 
         entries = self.history.snapshot()

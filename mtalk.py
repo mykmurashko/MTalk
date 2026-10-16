@@ -407,23 +407,45 @@ def run_engine(ui, history):
                 # speaking, so the first Russian dictation isn't a long wait
                 threading.Thread(target=russian_model, daemon=True).start()
                 return
-        if _is_hotkey(key) and not recording.is_set():
-            mode["lang"] = "en"
-            recording.set()
-            recorder.start()
-            ui.set_state("recording")
+        if _is_hotkey(key):
+            begin("en")
 
     def on_release(key):
-        if _is_hotkey(key) and recording.is_set():
+        if _is_hotkey(key):
+            finish()
+
+    # Recording is started/stopped by holding the hotkey, or by clicking the
+    # menu bar icon (Start Dictation, then click the red icon to stop).
+    rec_lock = threading.Lock()
+
+    def begin(lang, by_click=False):
+        with rec_lock:
+            if recording.is_set():
+                return
+            mode["lang"] = lang
+            recording.set()
+            recorder.start()
+        if lang == "ru":
+            threading.Thread(target=russian_model, daemon=True).start()
+        ui.set_state("recording", by_click=by_click)
+
+    def finish():
+        with rec_lock:
+            if not recording.is_set():
+                return
             recording.clear()
             lang = mode["lang"]
             audio = recorder.stop()
             with jobs_lock:
                 jobs["pending"] += 1
-            ui.set_state("working")
-            threading.Thread(
-                target=transcribe_job, args=(audio, lang), daemon=True
-            ).start()
+        ui.set_state("working")
+        threading.Thread(
+            target=transcribe_job, args=(audio, lang), daemon=True
+        ).start()
+
+    ui.on_start = begin
+    ui.on_stop = finish
+    ui.set_ready()
 
     def _is_hotkey(key):
         if key == hotkey:

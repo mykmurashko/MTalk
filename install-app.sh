@@ -15,7 +15,7 @@ VENV="$REPO/.venv"
 PY="$VENV/bin/python"
 
 mkdir -p "$REPO"
-cp "$SRC/mtalk.py" "$SRC/menubar.py" "$SRC/italian_prompt.txt" "$SRC/requirements.txt" "$REPO/"
+cp "$SRC/mtalk.py" "$SRC/menubar.py" "$SRC/audio_worker.py" "$SRC/italian_prompt.txt" "$SRC/requirements.txt" "$REPO/"
 
 if [ ! -x "$PY" ]; then
     echo "Creating virtualenv (one time)…"

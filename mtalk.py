@@ -33,17 +33,16 @@ import os
 import queue
 import sys
 import shutil
+import struct
 import subprocess
 import threading
 import time
 from datetime import datetime
 
 import numpy as np
-import sounddevice as sd
 from pynput import keyboard
 
 SAMPLE_RATE = 16000  # whisper expects 16 kHz mono
-CHANNELS = 1
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -53,7 +52,6 @@ HOTKEY_NAME = os.environ.get("MTALK_HOTKEY", "f5")
 ITALIAN_KEY = os.environ.get("MTALK_ITALIAN", "i").strip().lower()[:1] or "i"
 RUSSIAN_KEY = os.environ.get("MTALK_RUSSIAN", "r").strip().lower()[:1] or "r"
 AUTO_PASTE = os.environ.get("MTALK_PASTE", "1") != "0"
-DEVICE = os.environ.get("MTALK_DEVICE") or None
 CLAUDE_BIN = os.environ.get("MTALK_CLAUDE") or shutil.which("claude")
 PROMPT_PATH = os.environ.get("MTALK_PROMPT", os.path.join(HERE, "italian_prompt.txt"))
 
@@ -88,79 +86,93 @@ def load_italian_prompt():
 
 
 class Recorder:
-    """Captures microphone audio into memory while active.
+    """Records the microphone in a short-lived helper process (audio_worker.py).
 
-    Opening and closing the PortAudio stream happens on a dedicated worker
-    thread, never in the keyboard event-tap callback: on macOS, stopping a
-    stream can occasionally deadlock inside CoreAudio, and if that happens in
-    the keyboard listener the whole app freezes "recording" forever. Here the
-    audio is snapshotted first (a cheap in-memory copy), so a hung close only
-    leaks that one stream — the transcription still goes through."""
+    On macOS, stopping a PortAudio stream occasionally deadlocks inside
+    CoreAudio. In-process, that leaves the mic on and every later recording
+    hangs too, since opening a stream waits on the same CoreAudio lock. In a
+    helper process the audio is handed back before the stream is stopped, and
+    a helper that doesn't exit promptly is killed — which always releases the
+    mic. A spare helper is kept ready (mic closed) so recording starts fast.
 
-    CLOSE_TIMEOUT = 2.0  # seconds to wait for a stream to close before giving up
+    start() and stop() never block, so they're safe in the keyboard callback.
+    """
+
+    EXIT_TIMEOUT = 2.0  # seconds a helper gets to stop the mic and exit
 
     def __init__(self):
-        self._frames = []
-        self._capturing = False
-        self._stream = None
-        self._lock = threading.Lock()
         self._commands = queue.Queue()
-        threading.Thread(target=self._worker, daemon=True).start()
-
-    def _callback(self, indata, frames, time_info, status):
-        with self._lock:
-            if self._capturing:
-                self._frames.append(indata.copy())
+        threading.Thread(target=self._manager, daemon=True).start()
 
     def start(self):
-        """Begin capturing. Safe to call from the keyboard callback."""
-        with self._lock:
-            self._frames = []
-            self._capturing = True
-        self._commands.put("start")
+        self._commands.put(("start", None))
 
     def stop(self):
-        """Stop capturing and return the audio. Safe to call from the keyboard
-        callback: it never waits on the audio device."""
-        with self._lock:
-            self._capturing = False
-            frames, self._frames = self._frames, []
-        self._commands.put("stop")
-        if not frames:
-            return np.zeros(0, dtype=np.float32)
-        return np.concatenate(frames, axis=0).reshape(-1).astype(np.float32)
+        """Stop recording. Returns a callable that waits for and returns the audio."""
+        done = threading.Event()
+        box = {"audio": np.zeros(0, dtype=np.float32)}
+        self._commands.put(("stop", (done, box)))
 
-    def _worker(self):
-        closing = None  # thread closing the previous stream, if any
-        while True:
-            cmd = self._commands.get()
-            if cmd == "start" and self._stream is None:
-                if closing is not None:
-                    closing.join(self.CLOSE_TIMEOUT)
-                try:
-                    stream = sd.InputStream(
-                        samplerate=SAMPLE_RATE,
-                        channels=CHANNELS,
-                        dtype="float32",
-                        device=DEVICE,
-                        callback=self._callback,
-                    )
-                    stream.start()
-                    self._stream = stream
-                except Exception as exc:
-                    print(f"{RED}[error]{RESET} could not open microphone: {exc}", file=sys.stderr)
-            elif cmd == "stop" and self._stream is not None:
-                stream, self._stream = self._stream, None
-                closing = threading.Thread(target=self._close, args=(stream,), daemon=True)
-                closing.start()
+        def audio():
+            done.wait()
+            return box["audio"]
+
+        return audio
 
     @staticmethod
-    def _close(stream):
+    def _spawn():
+        return subprocess.Popen(
+            [sys.executable, os.path.join(HERE, "audio_worker.py")],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+        )
+
+    @staticmethod
+    def _send(proc, cmd):
         try:
-            stream.stop()
-            stream.close()
-        except Exception:
-            pass
+            proc.stdin.write(cmd.encode() + b"\n")
+            proc.stdin.flush()
+        except OSError:
+            pass  # helper died; _collect will come back empty
+
+    def _manager(self):
+        active = None
+        spare = self._spawn()
+        while True:
+            cmd, arg = self._commands.get()
+            if cmd == "start" and active is None:
+                if spare is None or spare.poll() is not None:
+                    spare = self._spawn()
+                active, spare = spare, None
+                self._send(active, "start")
+            elif cmd == "stop":
+                if active is None:
+                    arg[0].set()
+                    continue
+                proc, active = active, None
+                self._send(proc, "stop")
+                threading.Thread(target=self._collect, args=(proc, *arg), daemon=True).start()
+                spare = self._spawn()  # warm up the next one meanwhile
+
+    def _collect(self, proc, done, box):
+        # backstop: never wait on a helper forever
+        watchdog = threading.Timer(self.EXIT_TIMEOUT + 3, proc.kill)
+        watchdog.start()
+        try:
+            header = proc.stdout.read(8)
+            if len(header) == 8:
+                (n,) = struct.unpack("<Q", header)
+                data = proc.stdout.read(n)
+                if len(data) == n:
+                    box["audio"] = np.frombuffer(data, dtype=np.float32)
+        finally:
+            done.set()
+        try:
+            proc.wait(timeout=self.EXIT_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            proc.kill()  # stuck stopping the mic; killing it releases the mic
+            proc.wait()
+        watchdog.cancel()
 
 
 def copy_to_clipboard(text):
@@ -339,7 +351,7 @@ def run_engine(ui, history):
 
     def transcribe_job(audio, lang):
         try:
-            transcribe_and_emit(audio, lang)
+            transcribe_and_emit(audio(), lang)
         except Exception as exc:
             print(f"{RED}[error]{RESET} transcription failed: {exc}", file=sys.stderr)
         finally:
@@ -436,7 +448,7 @@ def run_engine(ui, history):
                 return
             recording.clear()
             lang = mode["lang"]
-            audio = recorder.stop()
+            audio = recorder.stop()  # a callable; the audio arrives shortly
             with jobs_lock:
                 jobs["pending"] += 1
         ui.set_state("working")

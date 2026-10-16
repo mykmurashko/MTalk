@@ -24,15 +24,15 @@ fi
 "$PY" -m pip install --quiet --upgrade pip
 "$PY" -m pip install --quiet -r "$REPO/requirements.txt"
 
-# A script-based app can be started under Rosetta; force native arm64 on
-# Apple Silicon so the installed (arm64) wheels load.
-ARCH=""
-if [ "$(sysctl -n hw.optional.arm64 2>/dev/null || echo 0)" = "1" ]; then
-    ARCH="arch -arm64"
-fi
-
 # Apps launched from Finder don't get your shell's PATH, so resolve claude now.
 CLAUDE="${MTALK_CLAUDE:-$(command -v claude || true)}"
+LAUNCH_PATH="$(dirname "${CLAUDE:-/usr/bin/true}"):/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+PYHOME="$("$PY" -c 'import sys; print(sys.base_prefix)')"  # …/Python3.framework/Versions/3.x
+SITE="$("$PY" -c 'import site; print(site.getsitepackages()[0])')"
+LIBPY="$PYHOME/Python3"; [ -f "$LIBPY" ] || LIBPY="$PYHOME/Python"
+INCLUDE="$PYHOME/Headers"
+FRAMEWORKS="$(cd "$PYHOME/../../.." && pwd)"  # dir holding Python3.framework (its @rpath)
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"
@@ -46,6 +46,7 @@ cat > "$APP/Contents/Info.plist" <<EOF
     <key>CFBundleDisplayName</key><string>MTalk</string>
     <key>CFBundleIdentifier</key><string>com.mtalk.app</string>
     <key>CFBundleExecutable</key><string>MTalk</string>
+    <key>CFBundleIconFile</key><string>MTalk</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleVersion</key><string>1</string>
     <key>CFBundleShortVersionString</key><string>1.0</string>
@@ -56,14 +57,18 @@ cat > "$APP/Contents/Info.plist" <<EOF
 </plist>
 EOF
 
-cat > "$APP/Contents/MacOS/MTalk" <<EOF
-#!/bin/bash
-cd "$REPO"
-export MTALK_CLAUDE="$CLAUDE"
-export PATH="$(dirname "${CLAUDE:-/usr/bin/true}"):/opt/homebrew/bin:/usr/local/bin:\$PATH"
-exec $ARCH "$PY" -u mtalk.py >> "\$HOME/Library/Logs/MTalk.log" 2>&1
-EOF
-chmod +x "$APP/Contents/MacOS/MTalk"
+mkdir -p "$APP/Contents/Resources"
+
+# Native launcher: Python runs inside MTalk's own process (see launcher.c).
+clang -O2 -o "$APP/Contents/MacOS/MTalk" "$SRC/launcher.c" \
+    -I "$INCLUDE" "$LIBPY" -Wl,-rpath,"$FRAMEWORKS" \
+    -DMTALK_DIR="\"$REPO\"" -DMTALK_SITE="\"$SITE\"" \
+    -DMTALK_CLAUDE="\"$CLAUDE\"" -DMTALK_PATH="\"$LAUNCH_PATH\""
+
+# App icon: the same "M" logo as the menu bar.
+ICONSET="$(mktemp -d)/MTalk.iconset"
+(cd "$REPO" && "$PY" -c "import sys, menubar; menubar.write_iconset(sys.argv[1])" "$ICONSET")
+iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/MTalk.icns"
 
 # A stable (ad-hoc) signature so macOS remembers the permissions you grant.
 codesign --force --sign - "$APP" >/dev/null 2>&1 || true

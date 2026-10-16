@@ -18,8 +18,17 @@ import objc
 from AppKit import (
     NSApplication,
     NSApplicationActivationPolicyAccessory,
+    NSAttributedString,
+    NSBezierPath,
     NSColor,
+    NSFont,
+    NSFontAttributeName,
+    NSFontWeightBold,
+    NSForegroundColorAttributeName,
     NSImage,
+    NSInsetRect,
+    NSMakePoint,
+    NSMakeSize,
     NSMenu,
     NSMenuItem,
     NSPasteboard,
@@ -35,16 +44,63 @@ HISTORY_PATH = os.path.join(SUPPORT_DIR, "history.jsonl")
 MAX_HISTORY = 500  # entries kept on disk and listed in the menu
 TITLE_CHARS = 60   # menu entries are truncated to this; the tooltip has it all
 
-# state -> (SF Symbol, tint). None tint = normal menu bar colour.
+# The icon is an "M" on a circle. state -> (circle colour, letter colour, alpha)
 STATES = {
-    "loading": ("hourglass", None),
-    "idle": ("mic", None),
-    "recording": ("mic.fill", "systemRedColor"),
-    "working": ("waveform", None),
-    "error": ("mic.slash", None),
+    "loading": ("whiteColor", "blackColor", 0.45),
+    "idle": ("whiteColor", "blackColor", 1.0),
+    "recording": ("systemRedColor", "whiteColor", 1.0),
+    "working": ("whiteColor", "blackColor", 0.6),
+    "error": ("systemGrayColor", "whiteColor", 1.0),
 }
+ICON_SIZE = 18  # points; menu bar icons are ~16–18pt tall
+
+
+def _make_icon(circle, letter, alpha):
+    size = NSMakeSize(ICON_SIZE, ICON_SIZE)
+
+    def draw(rect):
+        getattr(NSColor, circle)().colorWithAlphaComponent_(alpha).setFill()
+        NSBezierPath.bezierPathWithOvalInRect_(NSInsetRect(rect, 1, 1)).fill()
+        attrs = {
+            NSFontAttributeName: NSFont.systemFontOfSize_weight_(11, NSFontWeightBold),
+            NSForegroundColorAttributeName: getattr(NSColor, letter)(),
+        }
+        text = NSAttributedString.alloc().initWithString_attributes_("M", attrs)
+        ts = text.size()
+        text.drawAtPoint_(
+            NSMakePoint((ICON_SIZE - ts.width) / 2, (ICON_SIZE - ts.height) / 2)
+        )
+        return True
+
+    image = NSImage.imageWithSize_flipped_drawingHandler_(size, False, draw)
+    image.setAccessibilityDescription_("MTalk")
+    return image
 
 LANG_TAGS = {"it": "IT  ", "ru": "RU  "}
+
+
+def write_iconset(path):
+    """Write the app icon (the idle logo, large) as a .iconset for iconutil."""
+    from AppKit import NSBitmapImageFileTypePNG, NSBitmapImageRep, NSGraphicsContext
+
+    os.makedirs(path, exist_ok=True)
+    icon = _make_icon(*STATES["idle"])
+    for base in (16, 32, 128, 256, 512):
+        for scale in (1, 2):
+            px = base * scale
+            rep = NSBitmapImageRep.alloc().initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel_(
+                None, px, px, 8, 4, True, False, "NSDeviceRGBColorSpace", 0, 0
+            )
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.setCurrentContext_(
+                NSGraphicsContext.graphicsContextWithBitmapImageRep_(rep)
+            )
+            icon.drawInRect_(((0, 0), (px, px)))
+            NSGraphicsContext.restoreGraphicsState()
+            name = f"icon_{base}x{base}{'@2x' if scale == 2 else ''}.png"
+            rep.representationUsingType_properties_(NSBitmapImageFileTypePNG, None).writeToFile_atomically_(
+                os.path.join(path, name), True
+            )
 
 
 class History:
@@ -163,6 +219,7 @@ class MenuBar:
         self.history = history
         self.hint = hint  # e.g. "Hold F5 to dictate"
         self._status_line = "Loading model…"
+        self._icons = {}
 
         self.app = NSApplication.sharedApplication()
         # menu bar only: no Dock icon, no app switcher entry
@@ -197,15 +254,9 @@ class MenuBar:
     # --- main thread only -------------------------------------------------
 
     def _apply_state(self, state, status_line=None):
-        symbol, tint = STATES.get(state, STATES["idle"])
-        image = NSImage.imageWithSystemSymbolName_accessibilityDescription_(symbol, "MTalk")
-        button = self.item.button()
-        if image is not None:
-            image.setTemplate_(True)
-            button.setImage_(image)
-        else:  # very old macOS without SF Symbols
-            button.setTitle_("MTalk")
-        button.setContentTintColor_(getattr(NSColor, tint)() if tint else None)
+        if state not in self._icons:
+            self._icons[state] = _make_icon(*STATES.get(state, STATES["idle"]))
+        self.item.button().setImage_(self._icons[state])
         if status_line is not None:
             self._status_line = status_line
             self._rebuild_menu()

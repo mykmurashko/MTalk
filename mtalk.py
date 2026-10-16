@@ -30,6 +30,7 @@ Configure via environment variables:
 """
 
 import os
+import queue
 import sys
 import shutil
 import subprocess
@@ -86,40 +87,79 @@ def load_italian_prompt():
 
 
 class Recorder:
-    """Captures microphone audio into memory while active."""
+    """Captures microphone audio into memory while active.
+
+    Opening and closing the PortAudio stream happens on a dedicated worker
+    thread, never in the keyboard event-tap callback: on macOS, stopping a
+    stream can occasionally deadlock inside CoreAudio, and if that happens in
+    the keyboard listener the whole app freezes "recording" forever. Here the
+    audio is snapshotted first (a cheap in-memory copy), so a hung close only
+    leaks that one stream — the transcription still goes through."""
+
+    CLOSE_TIMEOUT = 2.0  # seconds to wait for a stream to close before giving up
 
     def __init__(self):
         self._frames = []
+        self._capturing = False
         self._stream = None
         self._lock = threading.Lock()
+        self._commands = queue.Queue()
+        threading.Thread(target=self._worker, daemon=True).start()
 
     def _callback(self, indata, frames, time_info, status):
         with self._lock:
-            self._frames.append(indata.copy())
+            if self._capturing:
+                self._frames.append(indata.copy())
 
     def start(self):
+        """Begin capturing. Safe to call from the keyboard callback."""
         with self._lock:
             self._frames = []
-        self._stream = sd.InputStream(
-            samplerate=SAMPLE_RATE,
-            channels=CHANNELS,
-            dtype="float32",
-            device=DEVICE,
-            callback=self._callback,
-        )
-        self._stream.start()
+            self._capturing = True
+        self._commands.put("start")
 
     def stop(self):
-        if self._stream is None:
-            return np.zeros(0, dtype=np.float32)
-        self._stream.stop()
-        self._stream.close()
-        self._stream = None
+        """Stop capturing and return the audio. Safe to call from the keyboard
+        callback: it never waits on the audio device."""
         with self._lock:
-            if not self._frames:
-                return np.zeros(0, dtype=np.float32)
-            audio = np.concatenate(self._frames, axis=0)
-        return audio.reshape(-1).astype(np.float32)
+            self._capturing = False
+            frames, self._frames = self._frames, []
+        self._commands.put("stop")
+        if not frames:
+            return np.zeros(0, dtype=np.float32)
+        return np.concatenate(frames, axis=0).reshape(-1).astype(np.float32)
+
+    def _worker(self):
+        closing = None  # thread closing the previous stream, if any
+        while True:
+            cmd = self._commands.get()
+            if cmd == "start" and self._stream is None:
+                if closing is not None:
+                    closing.join(self.CLOSE_TIMEOUT)
+                try:
+                    stream = sd.InputStream(
+                        samplerate=SAMPLE_RATE,
+                        channels=CHANNELS,
+                        dtype="float32",
+                        device=DEVICE,
+                        callback=self._callback,
+                    )
+                    stream.start()
+                    self._stream = stream
+                except Exception as exc:
+                    print(f"{RED}[error]{RESET} could not open microphone: {exc}", file=sys.stderr)
+            elif cmd == "stop" and self._stream is not None:
+                stream, self._stream = self._stream, None
+                closing = threading.Thread(target=self._close, args=(stream,), daemon=True)
+                closing.start()
+
+    @staticmethod
+    def _close(stream):
+        try:
+            stream.stop()
+            stream.close()
+        except Exception:
+            pass
 
 
 def copy_to_clipboard(text):

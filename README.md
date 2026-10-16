@@ -32,6 +32,9 @@ The console stays clean — one entry per result:
 - **F5 + I translates to Italian** as you dictate.
 - **F5 + R dictates in Russian**, transcribed straight to the clipboard with no
   translation step.
+- **Lives in the menu bar.** The icon shows when it's recording; click it for a
+  scrollable history of everything you've dictated — click any entry to copy it.
+  Install it as a standalone app with `./install-app.sh` (see step 4).
 - **A quiet CLI** that prints a timestamp and the text, nothing else.
 
 **Requirements:** macOS, Python 3.9+, Homebrew, and (for Italian only) the
@@ -108,6 +111,27 @@ python mtalk.py
 
 Or double-click **`start.command`** (opens a terminal window — it still needs the
 permissions from step 2).
+
+### As a menu bar app (no terminal)
+
+```bash
+./install-app.sh
+```
+
+This builds `~/Applications/MTalk.app` (open it from Spotlight). It lives in the
+menu bar: the icon shows when MTalk is loading, recording (red) or transcribing.
+**Click the icon** for a scrollable list of everything you've dictated — click
+an entry to copy it. History is kept in
+`~/Library/Application Support/MTalk/history.jsonl`; output is logged to
+`~/Library/Logs/MTalk.log`.
+
+The app runs from its own copy of the code in `~/Library/Application Support/MTalk`
+(macOS won't let it read `~/Documents`), so **re-run `./install-app.sh` after
+changing the code**. Grant the step 2 permissions to **MTalk** itself, then reopen
+it. To start it at login, add it under System Settings → General → Login Items.
+
+The menu bar icon also appears when you run `python mtalk.py` from a terminal.
+Only one MTalk runs at a time.
 
 Leave it running, then:
 

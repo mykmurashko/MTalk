@@ -244,6 +244,21 @@ _LETTER_VK = {
 }
 
 
+def acquire_single_instance_lock():
+    """Exit if MTalk is already running — two copies would paste everything twice."""
+    import fcntl
+
+    from menubar import SUPPORT_DIR
+
+    os.makedirs(SUPPORT_DIR, exist_ok=True)
+    f = open(os.path.join(SUPPORT_DIR, "mtalk.lock"), "w")
+    try:
+        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        raise SystemExit("MTalk is already running (see the menu bar).")
+    return f  # keep the file open: the lock lasts as long as the process
+
+
 def main():
     import logging
     import warnings
@@ -253,6 +268,25 @@ def main():
     for _name in ("faster_whisper", "huggingface_hub", "transformers", "ctranslate2", "urllib3"):
         logging.getLogger(_name).setLevel(logging.ERROR)
 
+    from menubar import History, MenuBar
+
+    lock = acquire_single_instance_lock()  # noqa: F841 (held until exit)
+    history = History()
+    ui = MenuBar(history, hint=f"Hold {HOTKEY_NAME.upper()} to dictate")
+
+    def engine():
+        try:
+            run_engine(ui, history)
+        except BaseException as exc:
+            print(f"{RED}[error]{RESET} {exc}", file=sys.stderr)
+            ui.set_state("error", f"MTalk stopped: {exc}")
+
+    threading.Thread(target=engine, daemon=True).start()
+    ui.run()  # the menu bar owns the main thread until Quit / Ctrl-C
+
+
+def run_engine(ui, history):
+    """Load the model and listen for the hotkey. Runs off the main thread."""
     from faster_whisper import WhisperModel
 
     # Transient loading cue that erases itself once the model is ready.
@@ -299,6 +333,21 @@ def main():
                     )
             return ru_state["model"]
 
+    jobs_lock = threading.Lock()
+    jobs = {"pending": 0}  # transcriptions in flight, for the menu bar icon
+
+    def transcribe_job(audio, lang):
+        try:
+            transcribe_and_emit(audio, lang)
+        except Exception as exc:
+            print(f"{RED}[error]{RESET} transcription failed: {exc}", file=sys.stderr)
+        finally:
+            with jobs_lock:
+                jobs["pending"] -= 1
+                done = jobs["pending"] == 0
+            if done and not recording.is_set():
+                ui.set_state("idle")
+
     def transcribe_and_emit(audio, lang):
         if audio.size < SAMPLE_RATE * 0.2:  # under ~0.2s, ignore
             return
@@ -319,12 +368,17 @@ def main():
                 copy_to_clipboard(it)  # only Italian on the clipboard
                 print(f"{DIM}{stamp}{RESET}  {text}")
                 print(f"{INDENT}{DIM}→{RESET} {it}")
+                history.add("it", text, it)
+                ui.history_changed()
                 if AUTO_PASTE:
                     paste()
                 return
             # translation failed — fall through and keep the English
+            lang = "en"
         copy_to_clipboard(text)
         print(f"{DIM}{stamp}{RESET}  {text}")
+        history.add(lang, text, text)
+        ui.history_changed()
         if AUTO_PASTE:
             paste()
 
@@ -357,14 +411,18 @@ def main():
             mode["lang"] = "en"
             recording.set()
             recorder.start()
+            ui.set_state("recording")
 
     def on_release(key):
         if _is_hotkey(key) and recording.is_set():
             recording.clear()
             lang = mode["lang"]
             audio = recorder.stop()
+            with jobs_lock:
+                jobs["pending"] += 1
+            ui.set_state("working")
             threading.Thread(
-                target=transcribe_and_emit, args=(audio, lang), daemon=True
+                target=transcribe_job, args=(audio, lang), daemon=True
             ).start()
 
     def _is_hotkey(key):
@@ -393,10 +451,22 @@ def main():
         darwin_intercept=darwin_intercept,
     )
     with listener:
-        try:
-            listener.join()
-        except KeyboardInterrupt:
-            print(f"\n{DIM}bye.{RESET}")
+        if not getattr(listener, "IS_TRUSTED", True):
+            # Show the system prompt that adds MTalk to the Accessibility list.
+            from ApplicationServices import (
+                AXIsProcessTrustedWithOptions,
+                kAXTrustedCheckOptionPrompt,
+            )
+
+            AXIsProcessTrustedWithOptions({kAXTrustedCheckOptionPrompt: True})
+            ui.set_state(
+                "error",
+                "Allow MTalk in Accessibility + Input Monitoring, then reopen it",
+            )
+            return
+        ui.set_state("idle")
+        listener.join()
+    raise RuntimeError("keyboard listener stopped")
 
 
 if __name__ == "__main__":

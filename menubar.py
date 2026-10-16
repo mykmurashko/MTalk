@@ -21,23 +21,33 @@ from AppKit import (
     NSApplication,
     NSApplicationActivationPolicyAccessory,
     NSAttributedString,
+    NSButton,
     NSBezierPath,
     NSColor,
     NSFont,
     NSFontAttributeName,
     NSFontWeightBold,
+    NSFontWeightMedium,
     NSForegroundColorAttributeName,
     NSGraphicsContext,
     NSImage,
     NSInsetRect,
     NSMakePoint,
+    NSMakeRect,
     NSMakeSize,
     NSMenu,
     NSMenuItem,
     NSPasteboard,
     NSPasteboardTypeString,
     NSStatusBar,
+    NSTrackingActiveAlways,
+    NSTrackingArea,
+    NSTrackingMouseEnteredAndExited,
     NSVariableStatusItemLength,
+    NSView,
+    NSViewMaxXMargin,
+    NSViewMinXMargin,
+    NSViewWidthSizable,
 )
 from Foundation import NSObject
 from PyObjCTools import AppHelper
@@ -211,6 +221,59 @@ def _entry_tooltip(entry):
     return output
 
 
+class _PillButton(NSButton):
+    """A capsule-shaped button for the bottom row of the menu."""
+
+    lang = None
+
+    def initWithFrame_(self, frame):
+        self = objc.super(_PillButton, self).initWithFrame_(frame)
+        if self is None:
+            return None
+        self.setBordered_(False)
+        self.setWantsLayer_(True)
+        self.layer().setCornerRadius_(frame.size.height / 2)
+        self.setFont_(NSFont.systemFontOfSize_weight_(13, NSFontWeightMedium))
+        self.paintHover_(False)
+        return self
+
+    def paintHover_(self, hover):
+        alpha = 0.22 if hover else 0.1
+
+        def paint():  # resolve the dynamic colour for this view's appearance
+            self.layer().setBackgroundColor_(
+                NSColor.labelColor().colorWithAlphaComponent_(alpha).CGColor()
+            )
+
+        self.effectiveAppearance().performAsCurrentDrawingAppearance_(paint)
+
+    def viewDidChangeEffectiveAppearance(self):
+        self.paintHover_(False)
+
+    def setEnabled_(self, enabled):
+        objc.super(_PillButton, self).setEnabled_(enabled)
+        self.setAlphaValue_(1.0 if enabled else 0.4)
+
+    def updateTrackingAreas(self):
+        objc.super(_PillButton, self).updateTrackingAreas()
+        for area in list(self.trackingAreas()):
+            self.removeTrackingArea_(area)
+        self.addTrackingArea_(
+            NSTrackingArea.alloc().initWithRect_options_owner_userInfo_(
+                self.bounds(),
+                NSTrackingMouseEnteredAndExited | NSTrackingActiveAlways,
+                self,
+                None,
+            )
+        )
+
+    def mouseEntered_(self, event):
+        self.paintHover_(self.isEnabled())
+
+    def mouseExited_(self, event):
+        self.paintHover_(False)
+
+
 class _MenuTarget(NSObject):
     """Receives menu clicks and forwards them to the MenuBar."""
 
@@ -227,9 +290,11 @@ class _MenuTarget(NSObject):
         pb.clearContents()
         pb.setString_forType_(text, NSPasteboardTypeString)
 
-    def startDictation_(self, sender):
+    def startPill_(self, sender):
+        # buttons inside a menu don't close it, so close it ourselves
+        self.owner.menu.cancelTracking()
         if self.owner.on_start is not None:
-            self.owner.on_start(sender.representedObject(), by_click=True)
+            self.owner.on_start(sender.lang, by_click=True)
 
     def iconClicked_(self, sender):
         # only fires while the menu is detached, i.e. during a click recording
@@ -325,16 +390,6 @@ class MenuBar:
         self._add(self._status_line, enabled=False)
         self.menu.addItem_(NSMenuItem.separatorItem())
 
-        # click to dictate: recording starts now, click the red icon to stop
-        for title, lang in (
-            ("Start Dictation", "en"),
-            ("Start Dictation → Italian", "it"),
-            ("Start Russian Dictation", "ru"),
-        ):
-            mi = self._add(title, "startDictation:", enabled=self._ready)
-            mi.setRepresentedObject_(lang)
-        self.menu.addItem_(NSMenuItem.separatorItem())
-
         entries = self.history.snapshot()
         if not entries:
             self._add("No recordings yet", enabled=False)
@@ -350,3 +405,37 @@ class MenuBar:
         if entries:
             self._add("Clear History", "clearHistory:")
         self._add("Quit MTalk", "quit:", key="q")
+        self.menu.addItem_(NSMenuItem.separatorItem())
+        self.menu.addItem_(self._pills_item())
+
+    def _pills_item(self):
+        """A row of pill buttons that start a click recording: dictation
+        starts at once, and a click on the red icon stops it."""
+        width, height, pad, gap = 300, 40, 12, 8
+        view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, width, height))
+        view.setAutoresizingMask_(NSViewWidthSizable)  # stretch with the menu
+
+        pills = (
+            ("English", "en", "Dictate in English"),
+            ("Italian", "it", "Speak English, get Italian"),
+            ("Russian", "ru", "Dictate in Russian"),
+        )
+        pill_w = (width - 2 * pad - gap * (len(pills) - 1)) / len(pills)
+        for i, (title, lang, tip) in enumerate(pills):
+            frame = NSMakeRect(pad + i * (pill_w + gap), 7, pill_w, height - 14)
+            button = _PillButton.alloc().initWithFrame_(frame)
+            button.setTitle_(title)
+            button.setToolTip_(tip)
+            button.setEnabled_(self._ready)
+            button.setTarget_(self.target)
+            button.setAction_("startPill:")
+            button.lang = lang
+            # keep the pills evenly spread when the menu is wider than `width`
+            button.setAutoresizingMask_(
+                NSViewWidthSizable | NSViewMinXMargin | NSViewMaxXMargin
+            )
+            view.addSubview_(button)
+
+        item = NSMenuItem.alloc().init()
+        item.setView_(view)
+        return item

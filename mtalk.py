@@ -35,6 +35,7 @@ import sys
 import shutil
 import subprocess
 import threading
+import time
 from datetime import datetime
 
 import numpy as np
@@ -467,29 +468,32 @@ def run_engine(ui, history):
             return None
         return event
 
+    # The hotkey needs Accessibility permission. Without it, ask once, then
+    # wait: F5 starts working the moment it's granted, no restart needed.
+    # (Click-to-dictate from the menu works meanwhile; it lands on the clipboard.)
+    from ApplicationServices import (
+        AXIsProcessTrusted,
+        AXIsProcessTrustedWithOptions,
+        kAXTrustedCheckOptionPrompt,
+    )
+
+    if not AXIsProcessTrusted():
+        AXIsProcessTrustedWithOptions({kAXTrustedCheckOptionPrompt: True})
+        ui.set_state("error", "Allow MTalk in Accessibility to use F5")
+        print("waiting for Accessibility permission…", file=sys.stderr)
+        while not AXIsProcessTrusted():
+            time.sleep(2)
+        print("Accessibility permission granted.", file=sys.stderr)
+
     listener = keyboard.Listener(
         on_press=on_press,
         on_release=on_release,
         darwin_intercept=darwin_intercept,
     )
     with listener:
-        if not getattr(listener, "IS_TRUSTED", True):
-            # Show the system prompt that adds MTalk to the Accessibility list.
-            from ApplicationServices import (
-                AXIsProcessTrustedWithOptions,
-                kAXTrustedCheckOptionPrompt,
-            )
-
-            AXIsProcessTrustedWithOptions({kAXTrustedCheckOptionPrompt: True})
-            ui.set_state(
-                "error",
-                "Allow MTalk in Accessibility + Input Monitoring, then reopen it",
-            )
-            return
-        ui.set_state("idle")
+        ui.set_state("idle", ui.hint)
         listener.join()
     raise RuntimeError("keyboard listener stopped")
-
 
 if __name__ == "__main__":
     main()

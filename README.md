@@ -123,9 +123,9 @@ This builds `~/Applications/MTalk.app` (open it from Spotlight). It lives in the
 menu bar as an **M** cut out of a circle: dimmed while loading or transcribing,
 solid red while recording. **Click the icon** for:
 
-- **Start Dictation** (also **→ Italian** and **Russian**) — no need to hold F5.
-  The icon turns red; **click the red M** to stop, and the text is pasted into
-  the app you were using.
+- **English / Italian / Russian** pills at the bottom — click one to start
+  dictating without holding F5. The icon turns red; **click the red M** to stop,
+  and the text is pasted into the app you were using.
 - A scrollable list of everything you've dictated — click an entry to copy it.
 
 History is kept in
@@ -134,7 +134,8 @@ History is kept in
 
 The app runs from its own copy of the code in `~/Library/Application Support/MTalk`
 (macOS won't let it read `~/Documents`), so **re-run `./install-app.sh` after
-changing the code**. That only replaces the app itself when the launcher or icon
+changing the code**. If Accessibility isn't granted yet, MTalk asks once and
+turns F5 on as soon as you allow it — no restart needed. Reinstalling only replaces the app itself when the launcher or icon
 changed, since macOS ties permissions to the app's exact build — so normally
 your permissions are kept. Grant the step 2 permissions to **MTalk** itself, then
 reopen it. To start it at login, add it under System Settings → General → Login Items.

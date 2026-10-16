@@ -120,7 +120,9 @@ permissions from step 2).
 ```
 
 This builds `~/Applications/MTalk.app` (open it from Spotlight). It lives in the
-menu bar as an **M** cut out of a circle: dimmed while loading or transcribing,
+menu bar as an **M** cut out of a circle: dimmed while loading, ringed by a
+spinner from the end of a recording until the text (or Italian translation) is
+on the clipboard,
 solid red while recording. **Click the icon** for:
 
 - **English / Italian / Russian** pills at the bottom — click one to start

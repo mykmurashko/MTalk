@@ -39,7 +39,10 @@ from AppKit import (
     NSMenuItem,
     NSPasteboard,
     NSPasteboardTypeString,
+    NSRunLoop,
+    NSRunLoopCommonModes,
     NSStatusBar,
+    NSTimer,
     NSTrackingActiveAlways,
     NSTrackingArea,
     NSTrackingMouseEnteredAndExited,
@@ -65,21 +68,43 @@ STATES = {
     "loading": ("blackColor", None, 0.4),
     "idle": ("blackColor", None, 1.0),
     "recording": ("systemRedColor", "whiteColor", 1.0),
-    "working": ("blackColor", None, 0.55),
+    "working": ("blackColor", None, 1.0),  # plus a spinning ring, see SPIN_*
     "error": ("blackColor", None, 0.3),
 }
 ICON_SIZE = 18  # points; menu bar icons are ~16–18pt tall
+SPIN_FRAMES = 12  # the "working" icon: an arc circling a slightly smaller M
+SPIN_INTERVAL = 0.07  # seconds per frame
 
 
-def _make_icon(circle, letter, alpha):
+def _make_icon(circle, letter, alpha, spin=None):
+    """The M logo. With `spin` (degrees) the circle shrinks a little and an
+    arc at that angle runs around it: one frame of the loading animation."""
     size = NSMakeSize(ICON_SIZE, ICON_SIZE)
+    inset = 1 if spin is None else 3.5
+    font_size = 10.5 * (ICON_SIZE - 2 * inset) / (ICON_SIZE - 2)
 
     def draw(rect):
-        getattr(NSColor, circle)().colorWithAlphaComponent_(alpha).setFill()
-        NSBezierPath.bezierPathWithOvalInRect_(NSInsetRect(rect, 1, 1)).fill()
+        colour = getattr(NSColor, circle)()
+        colour.colorWithAlphaComponent_(alpha).setFill()
+        NSBezierPath.bezierPathWithOvalInRect_(NSInsetRect(rect, inset, inset)).fill()
+
+        if spin is not None:
+            centre, radius = NSMakePoint(ICON_SIZE / 2, ICON_SIZE / 2), ICON_SIZE / 2 - 0.9
+            track = NSBezierPath.bezierPathWithOvalInRect_(NSInsetRect(rect, 0.9, 0.9))
+            track.setLineWidth_(1.5)
+            colour.colorWithAlphaComponent_(0.25).setStroke()
+            track.stroke()
+            arc = NSBezierPath.bezierPath()
+            arc.appendBezierPathWithArcWithCenter_radius_startAngle_endAngle_clockwise_(
+                centre, radius, spin, spin - 110, True
+            )
+            arc.setLineWidth_(1.5)
+            arc.setLineCapStyle_(1)  # round
+            colour.setStroke()
+            arc.stroke()
 
         attrs = {
-            NSFontAttributeName: NSFont.systemFontOfSize_weight_(10.5, NSFontWeightBold),
+            NSFontAttributeName: NSFont.systemFontOfSize_weight_(font_size, NSFontWeightBold),
             NSForegroundColorAttributeName: getattr(NSColor, letter or "blackColor")(),
         }
         text = NSAttributedString.alloc().initWithString_attributes_("M", attrs)
@@ -296,6 +321,9 @@ class _MenuTarget(NSObject):
         if self.owner.on_start is not None:
             self.owner.on_start(sender.lang, by_click=True)
 
+    def spinTick_(self, timer):
+        self.owner._spin_tick()
+
     def iconClicked_(self, sender):
         # only fires while the menu is detached, i.e. during a click recording
         if self.owner.on_stop is not None:
@@ -316,6 +344,8 @@ class MenuBar:
         self._status_line = "Loading model…"
         self._icons = {}
         self._ready = False
+        self._spin_timer = None
+        self._spin_frame = 0
         # set by the engine: on_start(lang, by_click=True), on_stop()
         self.on_start = None
         self.on_stop = None
@@ -362,9 +392,13 @@ class MenuBar:
     # --- main thread only -------------------------------------------------
 
     def _apply_state(self, state, status_line=None, by_click=False):
-        if state not in self._icons:
-            self._icons[state] = _make_icon(*STATES.get(state, STATES["idle"]))
-        self.item.button().setImage_(self._icons[state])
+        if state == "working":
+            self._start_spinner()
+        else:
+            self._stop_spinner()
+            if state not in self._icons:
+                self._icons[state] = _make_icon(*STATES.get(state, STATES["idle"]))
+            self.item.button().setImage_(self._icons[state])
         if state == "recording" and by_click:
             # detach the menu so one click on the red icon stops recording
             self.item.setMenu_(None)
@@ -376,6 +410,33 @@ class MenuBar:
         elif state == "idle" and self._status_line != self.hint:
             self._status_line = self.hint
             self._rebuild_menu()
+
+    def _start_spinner(self):
+        if self._spin_timer is not None:
+            return
+        if "spin" not in self._icons:
+            # clockwise, starting at 12 o'clock
+            self._icons["spin"] = [
+                _make_icon(*STATES["working"], spin=90 - i * 360 / SPIN_FRAMES)
+                for i in range(SPIN_FRAMES)
+            ]
+        self._spin_frame = 0
+        self._spin_tick()
+        self._spin_timer = NSTimer.timerWithTimeInterval_target_selector_userInfo_repeats_(
+            SPIN_INTERVAL, self.target, "spinTick:", None, True
+        )
+        # common modes: keep spinning while the menu is open
+        NSRunLoop.currentRunLoop().addTimer_forMode_(self._spin_timer, NSRunLoopCommonModes)
+
+    def _stop_spinner(self):
+        if self._spin_timer is not None:
+            self._spin_timer.invalidate()
+            self._spin_timer = None
+
+    def _spin_tick(self):
+        frames = self._icons["spin"]
+        self.item.button().setImage_(frames[self._spin_frame % len(frames)])
+        self._spin_frame += 1
 
     def _add(self, title, action=None, enabled=True, key=""):
         mi = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, action, key)
